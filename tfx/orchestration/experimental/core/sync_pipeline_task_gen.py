@@ -316,20 +316,21 @@ class _Generator:
               status=status_lib.Status(
                   code=status_lib.Code.ABORTED, message=error_msg)))
       return result
-    # TODO(b/207038460): Update sync pipeline to support ForEach.
-    input_artifacts = resolved_info.input_artifacts[0]
 
-    execution = execution_publish_utils.register_execution(
+    executions = execution_publish_utils.register_executions(
         metadata_handler=self._mlmd_handle,
         execution_type=node.node_info.type,
         contexts=resolved_info.contexts,
-        input_artifacts=input_artifacts,
+        input_dicts=resolved_info.input_artifacts,
         exec_properties=resolved_info.exec_properties)
     outputs_resolver = outputs_utils.OutputsResolver(
         node, self._pipeline.pipeline_info, self._pipeline.runtime_spec,
         self._pipeline.execution_mode)
-    output_artifacts = outputs_resolver.generate_output_artifacts(execution.id)
+    output_dicts = [
+        outputs_resolver.generate_output_artifacts(e.id) for e in executions
+    ]
 
+    # TODO(b/207038460): Update output cache to support ForEach.
     # Check if we can elide node execution by reusing previously computed
     # outputs for the node.
     cache_context = cache_utils.get_cache_context(
@@ -338,8 +339,8 @@ class _Generator:
         pipeline_info=self._pipeline.pipeline_info,
         executor_spec=task_gen_utils.get_executor_spec(self._pipeline,
                                                        node.node_info.id),
-        input_artifacts=input_artifacts,
-        output_artifacts=output_artifacts,
+        input_artifacts=resolved_info.input_artifacts[0],
+        output_artifacts=output_dicts[0],
         parameters=resolved_info.exec_properties)
     contexts = resolved_info.contexts + [cache_context]
     if node.execution_options.caching_options.enable_cache:
@@ -352,7 +353,7 @@ class _Generator:
         execution_publish_utils.publish_cached_execution(
             self._mlmd_handle,
             contexts=contexts,
-            execution_id=execution.id,
+            execution_id=executions[0].id,
             output_artifacts=cached_outputs)
         pstate.record_state_change_time()
         result.append(
@@ -373,23 +374,26 @@ class _Generator:
                   code=status_lib.Code.ABORTED, message=error_msg)))
       return result
 
-    outputs_utils.make_output_dirs(output_artifacts)
     result.append(
         task_lib.UpdateNodeStateTask(
             node_uid=node_uid, state=pstate.NodeState.RUNNING))
-    result.append(
-        task_lib.ExecNodeTask(
-            node_uid=node_uid,
-            execution_id=execution.id,
-            contexts=contexts,
-            input_artifacts=input_artifacts,
-            exec_properties=resolved_info.exec_properties,
-            output_artifacts=output_artifacts,
-            executor_output_uri=outputs_resolver.get_executor_output_uri(
-                execution.id),
-            stateful_working_dir=outputs_resolver
-            .get_stateful_working_directory(execution.id),
-            pipeline=self._pipeline))
+    for (input_artifacts, output_artifacts,
+         execution) in zip(resolved_info.input_artifacts, output_dicts,
+                           executions):
+      outputs_utils.make_output_dirs(output_artifacts)
+      result.append(
+          task_lib.ExecNodeTask(
+              node_uid=node_uid,
+              execution_id=execution.id,
+              contexts=contexts,
+              input_artifacts=input_artifacts,
+              exec_properties=resolved_info.exec_properties,
+              output_artifacts=output_artifacts,
+              executor_output_uri=outputs_resolver.get_executor_output_uri(
+                  execution.id),
+              stateful_working_dir=outputs_resolver
+              .get_stateful_working_directory(execution.id),
+              pipeline=self._pipeline))
     return result
 
   def _ensure_node_services_if_pure(
